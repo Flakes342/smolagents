@@ -56,6 +56,7 @@ class ActionStep(MemoryStep):
     error: AgentError | None = None
     model_output_message: ChatMessage | None = None
     model_output: str | list[dict[str, Any]] | None = None
+    thought: str | None = None
     code_action: str | None = None
     observations: str | None = None
     observations_images: list["PIL.Image.Image"] | None = None
@@ -79,6 +80,7 @@ class ActionStep(MemoryStep):
             if self.model_output_message
             else None,
             "model_output": self.model_output,
+            "thought": self.thought,
             "code_action": self.code_action,
             "observations": self.observations,
             "observations_images": [image.tobytes() for image in self.observations_images]
@@ -108,6 +110,9 @@ class ActionStep(MemoryStep):
                     ],
                 )
             )
+
+        if self.thought:
+            messages.append(f"Thought: {self.thought}")
 
         if self.observations_images:
             messages.append(

@@ -61,9 +61,11 @@ from .memory import (
 )
 from .models import (
     CODEAGENT_RESPONSE_FORMAT,
+    TOOLCALLING_RESPONSE_FORMAT,
     ChatMessage,
     ChatMessageStreamDelta,
     ChatMessageToolCall,
+    ChatMessageToolCallFunction,
     MessageRole,
     Model,
     agglomerate_stream_deltas,
@@ -1199,6 +1201,9 @@ class ToolCallingAgent(MultiStepAgent):
         max_tool_threads (`int`, *optional*): Maximum number of threads for parallel tool calls.
             Higher values increase concurrency but resource usage as well.
             Defaults to `ThreadPoolExecutor`'s default.
+        use_structured_outputs_internally (`bool`, default `False`): Whether to use structured generation at each action step
+            to expose the agent's reasoning process. When enabled, the model is forced to output its thought process
+            before making tool calls, which improves transparency and debuggability.
         **kwargs: Additional keyword arguments.
     """
 
@@ -1210,11 +1215,20 @@ class ToolCallingAgent(MultiStepAgent):
         planning_interval: int | None = None,
         stream_outputs: bool = False,
         max_tool_threads: int | None = None,
+        use_structured_outputs_internally: bool = False,
         **kwargs,
     ):
-        prompt_templates = prompt_templates or yaml.safe_load(
-            importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
-        )
+        self._use_structured_outputs_internally = use_structured_outputs_internally
+        if self._use_structured_outputs_internally and prompt_templates is None:
+            prompt_templates = yaml.safe_load(
+                importlib.resources.files("smolagents.prompts")
+                .joinpath("structured_toolcalling_agent.yaml")
+                .read_text()
+            )
+        else:
+            prompt_templates = prompt_templates or yaml.safe_load(
+                importlib.resources.files("smolagents.prompts").joinpath("toolcalling_agent.yaml").read_text()
+            )
         super().__init__(
             tools=tools,
             model=model,
@@ -1263,11 +1277,19 @@ class ToolCallingAgent(MultiStepAgent):
         memory_step.model_input_messages = input_messages
 
         try:
+            additional_args: dict[str, Any] = {}
+            if self._use_structured_outputs_internally:
+                additional_args["response_format"] = TOOLCALLING_RESPONSE_FORMAT
+                tools_param = None
+                additional_args["tool_choice"] = 'none'
+            else:
+                tools_param = self.tools_and_managed_agents
             if self.stream_outputs and hasattr(self.model, "generate_stream"):
                 output_stream = self.model.generate_stream(
                     input_messages,
                     stop_sequences=["Observation:", "Calling tools:"],
-                    tools_to_call_from=self.tools_and_managed_agents,
+                    tools_to_call_from=tools_param,
+                    **additional_args,
                 )
 
                 chat_message_stream_deltas: list[ChatMessageStreamDelta] = []
@@ -1283,7 +1305,7 @@ class ToolCallingAgent(MultiStepAgent):
                 chat_message: ChatMessage = self.model.generate(
                     input_messages,
                     stop_sequences=["Observation:", "Calling tools:"],
-                    tools_to_call_from=self.tools_and_managed_agents,
+                    tools_to_call_from=tools_param,
                 )
                 self.logger.log_markdown(
                     content=str(chat_message.content or chat_message.raw or ""),
@@ -1297,6 +1319,44 @@ class ToolCallingAgent(MultiStepAgent):
             memory_step.token_usage = chat_message.token_usage
         except Exception as e:
             raise AgentGenerationError(f"Error while generating output:\n{e}", self.logger) from e
+        
+        if self._use_structured_outputs_internally:
+            try:
+                structured_output = json.loads(chat_message.content)
+                thought = structured_output.get("thought", "")
+                memory_step.thought = thought
+                
+                # Logging the thought
+                if thought:
+                    self.logger.log(
+                        Panel(Text(thought, style="italic"), title="Agent Reasoning", border_style="bright_cyan"),
+                        level=LogLevel.INFO,
+                    )
+                
+                # Convert tool calls from structured format to ChatMessageToolCall objects
+                tool_calls_data = structured_output.get("tool_calls", [])
+                if tool_calls_data:
+                    chat_message.tool_calls = [
+                        ChatMessageToolCall(
+                            id=f"call_{memory_step.step_number}_{i}",
+                            type="function",
+                            function=ChatMessageToolCallFunction(
+                                name=tc["name"],
+                                arguments=tc["arguments"],
+                            ),
+                        )
+                        for i, tc in enumerate(tool_calls_data)
+                    ]
+                else:
+                    chat_message.tool_calls = []
+            except json.JSONDecodeError as e:
+                raise AgentParsingError(
+                    f"Failed to parse structured output: {e}\nOutput: {chat_message.content}",
+                    self.logger
+                ) from e
+            
+            except Exception as e:
+                raise AgentGenerationError(f"Error while generating output:\n{e}", self.logger) from e
 
         if chat_message.tool_calls is None or len(chat_message.tool_calls) == 0:
             try:
@@ -1413,7 +1473,39 @@ class ToolCallingAgent(MultiStepAgent):
         memory_step.observations = (
             memory_step.observations.rstrip("\n") if memory_step.observations else memory_step.observations
         )
+    
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the agent to a dictionary representation.
+        
+        Returns:
+            `dict`: Dictionary representation of the agent.
+        """
+        agent_dict = super().to_dict()
+        agent_dict["use_structured_outputs_internally"] = self._use_structured_outputs_internally
+        return agent_dict
 
+    @classmethod
+    def from_dict(cls, agent_dict: dict[str, Any], **kwargs) -> "ToolCallingAgent":
+        """Create ToolCallingAgent from a dictionary representation.
+
+        Args:
+            agent_dict (`dict[str, Any]`): Dictionary representation of the agent.
+            **kwargs: Additional keyword arguments that will override agent_dict values.
+
+        Returns:
+            `ToolCallingAgent`: Instance of the ToolCallingAgent class.
+        """
+        # Extract ToolCallingAgent-specific parameters
+        toolcalling_kwargs = {
+            "use_structured_outputs_internally": agent_dict.get("use_structured_outputs_internally", False),
+        }
+        # Filter out None values
+        toolcalling_kwargs = {k: v for k, v in toolcalling_kwargs.items() if v is not None}
+        # Update with any additional kwargs
+        toolcalling_kwargs.update(kwargs)
+        # Call the parent class's from_dict method
+        return super().from_dict(agent_dict, **toolcalling_kwargs)
+    
     def _substitute_state_variables(self, arguments: dict[str, str] | str) -> dict[str, Any] | str:
         """Replace string values in arguments with their corresponding state values if they exist."""
         if isinstance(arguments, dict):

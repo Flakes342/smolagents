@@ -62,6 +62,40 @@ CODEAGENT_RESPONSE_FORMAT = {
     },
 }
 
+TOOLCALLING_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "schema": {
+            "additionalProperties": False,
+            "properties": {
+                "thought": {
+                    "description": "Your reasoning process about the current situation, what you know, and what you need to do next.",
+                    "title": "Thought",
+                    "type": "string",
+                },
+                "tool_calls": {
+                    "description": "The tool calls you want to make. Leave empty if you just want to think without acting.",
+                    "title": "Tool Calls",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "The name of the tool to call"},
+                            "arguments": {"type": "object", "description": "The arguments to pass to the tool"},
+                        },
+                        "required": ["name", "arguments"],
+                    },
+                },
+            },
+            "required": ["thought", "tool_calls"],
+            "title": "ThoughtAndToolCalls",
+            "type": "object",
+        },
+        "name": "ThoughtAndToolCalls",
+        "strict": True,
+    },
+}
+
 
 def get_dict_from_nested_dataclasses(obj, ignore_key=None):
     def convert(obj):
@@ -1466,7 +1500,7 @@ class InferenceClientModel(ApiModel):
             messages=messages,
             stop_sequences=stop_sequences,
             tools_to_call_from=tools_to_call_from,
-            # response_format=response_format,
+            response_format=response_format,
             convert_images_to_image_urls=True,
             custom_role_conversions=self.custom_role_conversions,
             **kwargs,
